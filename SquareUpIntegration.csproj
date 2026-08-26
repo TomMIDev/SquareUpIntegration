@@ -1,0 +1,30 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="Services\xxxSquareOrderService.cs" />
+    <Compile Remove="xxxProgram.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Composition.Hosting" Version="10.0.11" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\CBETransactionIntegration\CBETransactionIntegration\CBETransactionIntegration.csproj" />
+    <ProjectReference Include="..\..\DataAccessUtility\DataAccessUtility\DataAccessUtility.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="appsettings.development.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

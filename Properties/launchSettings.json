@@ -1,0 +1,10 @@
+﻿{
+  "profiles": {
+    "SquareUpIntegration": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}

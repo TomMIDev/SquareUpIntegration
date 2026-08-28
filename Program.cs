@@ -4,6 +4,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Square;
 using SquareUpIntegration.Services;
+using DataAccessUtility;
+using SquareUpIntegration.Repositories;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -35,6 +37,43 @@ builder.Services.AddSingleton<SquareClient>(serviceProvider =>
 
 // Register services used by the Square integration.
 builder.Services.AddScoped<SquareOrderService>();
+builder.Services.AddScoped<SquareProductService>();
+
+// Register SQL access.
+builder.Services.AddScoped<IDataAccess>(serviceProvider =>
+{
+    var configuration =
+        serviceProvider.GetRequiredService<IConfiguration>();
+
+    var connectionString =
+        configuration.GetConnectionString("SquareUp");
+
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        throw new InvalidOperationException(
+            "SquareUp database connection string has not been configured.");
+    }
+
+    return new SqlDataAccess(connectionString);
+});
+
+// Register repositories used to persist Square reference data.
+builder.Services.AddScoped<
+    ISquareReferenceDataRepository,
+    SquareReferenceDataRepository>();
+
+// Register the repository used to persist Square orders,
+// fulfilments and order line items.
+builder.Services.AddScoped<
+    ISquareOrderRepository,
+    SquareOrderRepository>();
+
+// Register the service that coordinates saving Square locations
+// and catalogue variations to the database.
+builder.Services.AddScoped<SquareReferenceDataService>();
+
+// Register the service that stages Square orders to the database.
+builder.Services.AddScoped<SquareOrderPersistenceService>();
 
 using var host = builder.Build();
 using var scope = host.Services.CreateScope();
@@ -44,32 +83,150 @@ var squareClient =
 
 var squareOrderService =
     scope.ServiceProvider.GetRequiredService<SquareOrderService>();
+var squareProductService =
+    scope.ServiceProvider.GetRequiredService<SquareProductService>();
+var squareReferenceDataService =
+    scope.ServiceProvider
+        .GetRequiredService<SquareReferenceDataService>();
+
+var squareReferenceDataRepository =
+    scope.ServiceProvider
+        .GetRequiredService<ISquareReferenceDataRepository>();
+
+var squareOrderPersistenceService =
+    scope.ServiceProvider
+        .GetRequiredService<SquareOrderPersistenceService>();
 
 try
 {
     // Retrieve the Square locations available to this Sandbox account.
     var response = await squareClient.Locations.ListAsync();
 
-    if (response.Locations == null || !response.Locations.Any())
-    {
-        Console.WriteLine(
-            "Square connection succeeded, but no locations were returned.");
+    var isSandbox = string.Equals(
+        builder.Configuration["Square:Environment"],
+        "Sandbox",
+        StringComparison.OrdinalIgnoreCase);
 
-        return;
-    }
+    var locations = response.Locations?
+        .Where(location =>
+            !isSandbox ||
+            !string.Equals(
+                location.Name,
+                "Default Test Account",
+                StringComparison.OrdinalIgnoreCase))
+        .ToList()
+        ?? [];
 
     Console.WriteLine("Square connection succeeded.");
     Console.WriteLine();
     Console.WriteLine("Locations:");
 
-    foreach (var location in response.Locations)
+    if (locations.Count == 0)
+    {
+        Console.WriteLine(
+            "Square connection succeeded, but no usable locations were returned.");
+
+        return;
+    }
+
+    foreach (var location in locations)
     {
         Console.WriteLine(
             $"{location.Name} - Location ID: {location.Id}");
     }
 
+
+    // Retrieve products from the Square catalogue.
+    // This runs before any order-related return statements.
+    var products =
+        await squareProductService.GetProductsAsync();
+
+    Console.WriteLine();
+    Console.WriteLine($"Products returned by Square: {products.Count}");
+
+    foreach (var product in products)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"Item: {product.ItemName}");
+        Console.WriteLine($"Item ID: {product.ItemId}");
+        Console.WriteLine($"Variation: {product.VariationName}");
+        Console.WriteLine($"Variation ID: {product.VariationId}");
+        Console.WriteLine($"SKU: {product.Sku ?? "<not supplied>"}");
+
+        if (product.PriceAmount is long amount)
+        {
+            Console.WriteLine(
+                $"Price: {FormatMoney(
+                    amount,
+                    product.Currency)}");
+        }
+        else
+        {
+            Console.WriteLine("Price: <not supplied>");
+        }
+    }
+
+    // Save the Square locations and catalogue variations already retrieved
+    // above into the local SquareUp database.
+    var referenceDataSaveResult =
+        await squareReferenceDataService.SaveAsync(
+            locations,
+            products);
+
+    Console.WriteLine();
+    Console.WriteLine("Reference data saved to database:");
+    Console.WriteLine(
+        $"  Locations: {referenceDataSaveResult.LocationsSaved}");
+    Console.WriteLine(
+        $"  Catalogue variations: {referenceDataSaveResult.CatalogVariationsSaved}");
+
+    // Populate ProductMapping using Square SKU as the BO product code.
+    // The catalogue variation has already been written above.
+    var productMappingsSaved = 0;
+    var productMappingsSkipped = 0;
+
+    foreach (var product in products)
+    {
+        if (string.IsNullOrWhiteSpace(product.VariationId))
+        {
+            productMappingsSkipped++;
+            continue;
+        }
+
+        if (string.IsNullOrWhiteSpace(product.Sku) ||
+            !int.TryParse(
+                product.Sku.Trim(),
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out var boProductCode))
+        {
+            productMappingsSkipped++;
+
+            Console.WriteLine(
+                $"Product mapping skipped for " +
+                $"{product.ItemName ?? "<unnamed item>"} " +
+                $"({product.VariationId}): " +
+                $"SKU '{product.Sku ?? "<not supplied>"}' " +
+                "is not a valid BO product code.");
+
+            continue;
+        }
+
+        await squareReferenceDataRepository.SetProductMappingAsync(
+            product.VariationId,
+            boProductCode,
+            product.IsActive);
+
+        productMappingsSaved++;
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("Product mappings saved to database:");
+    Console.WriteLine($"  Saved: {productMappingsSaved}");
+    Console.WriteLine($"  Skipped: {productMappingsSkipped}");
+
     // Extract the Location IDs required by the Orders API.
-    var locationIds = response.Locations
+    var locationIds = locations
         .Where(location => !string.IsNullOrWhiteSpace(location.Id))
         .Select(location => location.Id!)
         .ToList();
@@ -97,21 +254,88 @@ try
     Console.WriteLine(
         $"Searching for orders due for collection on {collectionDate:dd/MM/yyyy}...");
 
-    // Retrieve only orders due for collection tomorrow.
+
+    var allOrders =
+    await squareOrderService.GetOrdersAsync(locationIds);
+
+    Console.WriteLine();
+    Console.WriteLine($"All orders returned by Square: {allOrders.Count}");
+
+    foreach (var order in allOrders)
+    {
+        Console.WriteLine(
+            $"  {order.Id} - Location: {order.LocationId}");
+    }
+
+    Console.WriteLine();
+
+    // Filter the orders already returned by Square.
+    // This avoids making a second SearchOrders API call and ensures
+    // that the collection-date filter works against the same snapshot.
     var ordersForCollection =
-        await squareOrderService.GetOrdersForCollectionDateAsync(
-            locationIds,
+        squareOrderService.GetOrdersForCollectionDate(
+            allOrders,
             collectionDate);
 
     Console.WriteLine();
     Console.WriteLine(
         $"Orders for collection on {collectionDate:dd/MM/yyyy}:");
 
+    Console.WriteLine();
+    Console.WriteLine(
+        $"Filtered orders count: {ordersForCollection.Count}");
+
+    foreach (var order in allOrders)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"Checking Order: {order.Id}");
+
+        if (order.Fulfillments == null)
+        {
+            Console.WriteLine("  No fulfillments.");
+            continue;
+        }
+
+        foreach (var fulfillment in order.Fulfillments)
+        {
+            Console.WriteLine(
+                $"  Fulfillment Type: {fulfillment.Type}");
+
+            Console.WriteLine(
+                $"  Pickup At: " +
+                $"{fulfillment.PickupDetails?.PickupAt ?? "<none>"}");
+        }
+    }
+
     if (!ordersForCollection.Any())
     {
         Console.WriteLine("No orders found for collection tomorrow.");
         return;
     }
+
+    if (!ordersForCollection.Any())
+    {
+        Console.WriteLine("No orders found for collection tomorrow.");
+        return;
+    }
+
+    // Stage the complete orders due for collection tomorrow.
+    // This writes:
+    //   Square.SquareOrder
+    //   Square.OrderFulfillment
+    //   Square.OrderLine
+    var orderPersistenceResult =
+        await squareOrderPersistenceService.SaveAsync(
+            ordersForCollection);
+
+    Console.WriteLine();
+    Console.WriteLine("Orders staged to database:");
+    Console.WriteLine(
+        $"  Orders: {orderPersistenceResult.OrdersSaved}");
+    Console.WriteLine(
+        $"  Fulfilments: {orderPersistenceResult.FulfillmentsSaved}");
+    Console.WriteLine(
+        $"  Order lines: {orderPersistenceResult.OrderLinesSaved}");
 
     foreach (var order in ordersForCollection)
     {
@@ -206,6 +430,7 @@ catch (Exception ex)
     Console.WriteLine("Application error.");
     Console.WriteLine(ex.Message);
 }
+
 
 static bool TryConvertToUkTime(
     string? pickupAtText,

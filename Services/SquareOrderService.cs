@@ -12,10 +12,14 @@ namespace SquareUpIntegration.Services
     public class SquareOrderService
     {
         private readonly SquareClient _client;
+        private readonly TimeZoneInfo _ukTimeZone;
 
         public SquareOrderService(SquareClient client)
         {
-            _client = client ?? throw new ArgumentNullException(nameof(client));
+            _client = client
+                ?? throw new ArgumentNullException(nameof(client));
+
+            _ukTimeZone = GetUkTimeZone();
         }
 
         public async Task<IReadOnlyList<Order>> GetOrdersAsync(
@@ -69,6 +73,20 @@ namespace SquareUpIntegration.Services
             return orders;
         }
 
+        public IReadOnlyList<Order> GetOrdersForCollectionDate(
+            IEnumerable<Order> orders,
+            DateOnly collectionDate)
+        {
+            ArgumentNullException.ThrowIfNull(orders);
+
+            return orders
+                .Where(order =>
+                    HasPickupOnCollectionDate(
+                        order,
+                        collectionDate))
+                .ToList();
+        }
+
         public async Task<IReadOnlyList<Order>> GetOrdersForCollectionDateAsync(
             IEnumerable<string> locationIds,
             DateOnly collectionDate,
@@ -78,12 +96,12 @@ namespace SquareUpIntegration.Services
                 locationIds,
                 cancellationToken);
 
-            return orders
-                .Where(order => HasPickupOnCollectionDate(order, collectionDate))
-                .ToList();
+            return GetOrdersForCollectionDate(
+                orders,
+                collectionDate);
         }
 
-        private static bool HasPickupOnCollectionDate(
+        private bool HasPickupOnCollectionDate(
             Order order,
             DateOnly collectionDate)
         {
@@ -94,7 +112,8 @@ namespace SquareUpIntegration.Services
 
             foreach (var fulfillment in order.Fulfillments)
             {
-                var pickupAtText = fulfillment.PickupDetails?.PickupAt;
+                var pickupAtText =
+                    fulfillment.PickupDetails?.PickupAt;
 
                 if (string.IsNullOrWhiteSpace(pickupAtText))
                 {
@@ -104,13 +123,20 @@ namespace SquareUpIntegration.Services
                 if (!DateTimeOffset.TryParse(
                     pickupAtText,
                     CultureInfo.InvariantCulture,
-                    DateTimeStyles.None,
+                    DateTimeStyles.RoundtripKind,
                     out var pickupAt))
                 {
                     continue;
                 }
 
-                var pickupDate = DateOnly.FromDateTime(pickupAt.DateTime);
+                // Convert Square's timestamp to UK local time before
+                // deciding which collection date it belongs to.
+                var pickupAtUk = TimeZoneInfo.ConvertTime(
+                    pickupAt,
+                    _ukTimeZone);
+
+                var pickupDate = DateOnly.FromDateTime(
+                    pickupAtUk.DateTime);
 
                 if (pickupDate == collectionDate)
                 {
@@ -119,6 +145,22 @@ namespace SquareUpIntegration.Services
             }
 
             return false;
+        }
+
+        private static TimeZoneInfo GetUkTimeZone()
+        {
+            try
+            {
+                // Windows
+                return TimeZoneInfo.FindSystemTimeZoneById(
+                    "GMT Standard Time");
+            }
+            catch (TimeZoneNotFoundException)
+            {
+                // Linux / macOS
+                return TimeZoneInfo.FindSystemTimeZoneById(
+                    "Europe/London");
+            }
         }
     }
 }

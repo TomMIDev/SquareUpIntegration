@@ -8,7 +8,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Remove="Services\xxxSquareOrderService.cs" />
     <Compile Remove="xxxProgram.cs" />
   </ItemGroup>
 

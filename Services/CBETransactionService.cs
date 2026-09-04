@@ -54,16 +54,11 @@ namespace SquareUpIntegration.Services
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                ValidateTransaction(transaction);
-
                 receipts.Add(BuildReceipt(transaction));
             }
 
             cancellationToken.ThrowIfCancellationRequested();
 
-            // Do not let CBETransactionIntegration auto-process yet.
-            // First inspect the returned statuses so only successfully
-            // accepted receipts are passed through WEBSLSET / WSJNLSET.
             var statuses = await Receipts.Push(
                 backOfficeConnectionString,
                 receipts,
@@ -82,7 +77,7 @@ namespace SquareUpIntegration.Services
                 if (receiptStatus == null)
                 {
                     throw new InvalidOperationException(
-                        $"CBETransactionIntegration did not return a status " +
+                        "CBETransactionIntegration did not return a status " +
                         $"for Square order {transaction.SquareOrderId}.");
                 }
 
@@ -112,9 +107,11 @@ namespace SquareUpIntegration.Services
             return results;
         }
 
-        private static Receipt BuildReceipt(
+        public Receipt BuildReceipt(
             CbeTransactionRequest transaction)
         {
+            ValidateTransaction(transaction);
+
             var receipt = new Receipt(PaymentType)
             {
                 ReceiptNo = transaction.SquareOrderId,
@@ -130,8 +127,8 @@ namespace SquareUpIntegration.Services
 
                 var receiptLine = new ReceiptLine
                 {
-                    // Leave PLUID blank. CBETransactionIntegration already
-                    // resolves ProductCode to PLUID in the Back Office.
+                    PLUID = line.PLUID,
+
                     ProductCode =
                         line.BOProductCode.ToString(
                             CultureInfo.InvariantCulture),
@@ -170,20 +167,17 @@ namespace SquareUpIntegration.Services
         {
             ArgumentNullException.ThrowIfNull(transaction);
 
-            if (string.IsNullOrWhiteSpace(
-                transaction.SquareOrderId))
+            if (string.IsNullOrWhiteSpace(transaction.SquareOrderId))
             {
                 throw new InvalidOperationException(
                     "Square Order ID must be supplied.");
             }
 
-            // CBETransactionIntegration creates ReceiptNo as VARCHAR(50).
             if (transaction.SquareOrderId.Length > 50)
             {
                 throw new InvalidOperationException(
                     $"Square Order ID '{transaction.SquareOrderId}' " +
-                    "is longer than the 50-character ReceiptNo " +
-                    "supported by CBETransactionIntegration.");
+                    "is longer than the 50-character ReceiptNo supported by CBE.");
             }
 
             if (transaction.TransactionDateTime == default)
@@ -208,6 +202,21 @@ namespace SquareUpIntegration.Services
         {
             ArgumentNullException.ThrowIfNull(line);
 
+            if (string.IsNullOrWhiteSpace(line.PLUID))
+            {
+                throw new InvalidOperationException(
+                    $"Square order {squareOrderId}, product " +
+                    $"{line.BOProductCode}, does not have a PLUID.");
+            }
+
+            if (line.PLUID.Length > 13)
+            {
+                throw new InvalidOperationException(
+                    $"Square order {squareOrderId}, product " +
+                    $"{line.BOProductCode}, has PLUID '{line.PLUID}' " +
+                    "which is longer than 13 characters.");
+            }
+
             if (line.BOProductCode <= 0)
             {
                 throw new InvalidOperationException(
@@ -219,8 +228,7 @@ namespace SquareUpIntegration.Services
             {
                 throw new InvalidOperationException(
                     $"Square order {squareOrderId}, product " +
-                    $"{line.BOProductCode}, has a quantity that " +
-                    "is not greater than zero.");
+                    $"{line.BOProductCode}, has invalid quantity.");
             }
 
             if (!line.UnitPriceAmountMinor.HasValue)

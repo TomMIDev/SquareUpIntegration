@@ -1,16 +1,15 @@
+using System.Globalization;
 using DataAccessUtility;
 using SquareUpIntegration.Models;
 
 namespace SquareUpIntegration.Repositories
 {
-    public class CbeTransactionRepository
-        : ICbeTransactionRepository
+    public class CbeTransactionRepository : ICbeTransactionRepository
     {
         private readonly IDataAccess _dataAccess;
         private readonly TimeZoneInfo _ukTimeZone;
 
-        public CbeTransactionRepository(
-            IDataAccess dataAccess)
+        public CbeTransactionRepository(IDataAccess dataAccess)
         {
             _dataAccess = dataAccess
                 ?? throw new ArgumentNullException(nameof(dataAccess));
@@ -57,53 +56,41 @@ namespace SquareUpIntegration.Repositories
                     firstRow.SquareOrderId,
                     orderGroup);
 
-                var pickupAtUk = TimeZoneInfo.ConvertTime(
-                    firstRow.PickupAtUtc,
-                    _ukTimeZone);
+                var pickupAtUk =
+                    TimeZoneInfo.ConvertTime(
+                        firstRow.PickupAtUtc,
+                        _ukTimeZone);
 
                 var transactionDateTime =
                     DateTime.SpecifyKind(
                         pickupAtUk.DateTime,
                         DateTimeKind.Unspecified);
 
-                var transaction =
-                    new CbeTransactionRequest
-                    {
-                        SquareOrderId =
-                            firstRow.SquareOrderId,
-
-                        SquareLocationId =
-                            firstRow.SquareLocationId,
-
-                        BOStoreCode =
-                            firstRow.BOStoreCode,
-
-                        TransactionDateTime =
-                            transactionDateTime
-                    };
+                var transaction = new CbeTransactionRequest
+                {
+                    SquareOrderId = firstRow.SquareOrderId,
+                    SquareLocationId = firstRow.SquareLocationId,
+                    BOStoreCode = firstRow.BOStoreCode,
+                    TransactionDateTime = transactionDateTime
+                };
 
                 foreach (var row in orderGroup)
                 {
                     transaction.Lines.Add(
                         new CbeTransactionLine
                         {
-                            BOProductCode =
-                                row.BOProductCode,
+                            PLUID = row.PLUID.ToString(
+                                CultureInfo.InvariantCulture),
 
-                            Quantity =
-                                row.Quantity,
-
+                            BOProductCode = row.BOProductCode,
+                            Quantity = row.Quantity,
                             UnitPriceAmountMinor =
                                 row.BasePriceAmountMinor,
-
                             TotalAmountMinor =
                                 row.LineTotalAmountMinor,
-
                             DiscountAmountMinor = 0,
-
                             OriginalUnitPriceAmountMinor =
                                 row.BasePriceAmountMinor,
-
                             TaxAmountMinor = 0,
                             VatPercent = 0
                         });
@@ -124,44 +111,31 @@ namespace SquareUpIntegration.Repositories
             if (rowList.Count == 0)
             {
                 throw new InvalidOperationException(
-                    $"Square order {squareOrderId} " +
-                    "does not contain any lines.");
+                    $"Square order {squareOrderId} does not contain any lines.");
             }
 
-            var storeCodes = rowList
-                .Select(row => row.BOStoreCode)
+            if (rowList.Select(row => row.BOStoreCode)
                 .Distinct()
-                .ToList();
-
-            if (storeCodes.Count != 1)
+                .Count() != 1)
             {
                 throw new InvalidOperationException(
-                    $"Square order {squareOrderId} " +
-                    "returned more than one BO store code.");
+                    $"Square order {squareOrderId} returned more than one BO store code.");
             }
 
-            var locationIds = rowList
-                .Select(row => row.SquareLocationId)
+            if (rowList.Select(row => row.SquareLocationId)
                 .Distinct(StringComparer.Ordinal)
-                .ToList();
-
-            if (locationIds.Count != 1)
+                .Count() != 1)
             {
                 throw new InvalidOperationException(
-                    $"Square order {squareOrderId} " +
-                    "returned more than one Square Location ID.");
+                    $"Square order {squareOrderId} returned more than one Square Location ID.");
             }
 
-            var pickupTimes = rowList
-                .Select(row => row.PickupAtUtc)
+            if (rowList.Select(row => row.PickupAtUtc)
                 .Distinct()
-                .ToList();
-
-            if (pickupTimes.Count != 1)
+                .Count() != 1)
             {
                 throw new InvalidOperationException(
-                    $"Square order {squareOrderId} " +
-                    "returned more than one pickup date/time.");
+                    $"Square order {squareOrderId} returned more than one pickup date/time.");
             }
 
             var currencies = rowList
@@ -169,20 +143,20 @@ namespace SquareUpIntegration.Repositories
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            if (currencies.Count != 1)
+            if (currencies.Count != 1 ||
+                !string.Equals(
+                    currencies[0],
+                    "GBP",
+                    StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidOperationException(
-                    $"Square order {squareOrderId} " +
-                    "contains multiple currencies.");
+                    $"Square order {squareOrderId} is not wholly in GBP.");
             }
 
-            if (!string.Equals(
-                currencies[0],
-                "GBP",
-                StringComparison.OrdinalIgnoreCase))
+            if (rowList.Any(row => row.PLUID <= 0))
             {
                 throw new InvalidOperationException(
-                    $"Square order {squareOrderId} is not in GBP.");
+                    $"Square order {squareOrderId} contains a line without a valid PLUID.");
             }
         }
 
@@ -202,29 +176,18 @@ namespace SquareUpIntegration.Repositories
 
         public sealed class ReadyTransactionRow
         {
-            public string SquareOrderId { get; set; } =
-                string.Empty;
-
-            public string SquareLocationId { get; set; } =
-                string.Empty;
-
+            public string SquareOrderId { get; set; } = string.Empty;
+            public string SquareLocationId { get; set; } = string.Empty;
             public int BOStoreCode { get; set; }
-
             public DateTimeOffset PickupAtUtc { get; set; }
-
-            public string LineUid { get; set; } =
-                string.Empty;
-
+            public string LineUid { get; set; } = string.Empty;
             public int BOProductCode { get; set; }
-
+            public long PLUID { get; set; }
+            public string? PLUDescription { get; set; }
             public decimal Quantity { get; set; }
-
             public long BasePriceAmountMinor { get; set; }
-
             public long LineTotalAmountMinor { get; set; }
-
-            public string LineCurrency { get; set; } =
-                string.Empty;
+            public string LineCurrency { get; set; } = string.Empty;
         }
     }
 }

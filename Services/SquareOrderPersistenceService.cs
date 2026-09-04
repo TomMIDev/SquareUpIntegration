@@ -48,7 +48,22 @@ namespace SquareUpIntegration.Services
                 {
                     SquareOrderId = order.Id,
                     SquareLocationId = order.LocationId,
-                    OrderState = order.State?.ToString()
+                    CustomerId = order.CustomerId,
+                    OrderState = order.State?.ToString(),
+                    SquareVersion = order.Version,
+
+                    // Square stores money in minor units.
+                    // For GBP, 4000 represents £40.00.
+                    TotalAmountMinor =
+                        order.TotalMoney?.Amount,
+
+                    Currency =
+                        order.TotalMoney?
+                            .Currency?
+                            .ToString(),
+
+                    SourceName =
+                        order.Source?.Name
                 };
 
                 await _repository.BeginOrderRefreshAsync(
@@ -151,9 +166,21 @@ namespace SquareUpIntegration.Services
                             ItemName = lineItem.Name,
                             VariationName = lineItem.VariationName,
                             Quantity = quantity,
+
+                            // Unit price in Square minor currency units.
                             BasePriceAmountMinor =
                                 lineItem.BasePriceMoney?.Amount,
+
+                            // Actual total value for this Square order line.
+                            // This is required by the receipt/injection views.
+                            TotalAmountMinor =
+                                lineItem.TotalMoney?.Amount,
+
                             Currency =
+                                lineItem.TotalMoney?
+                                    .Currency?
+                                    .ToString()
+                                ??
                                 lineItem.BasePriceMoney?
                                     .Currency?
                                     .ToString()

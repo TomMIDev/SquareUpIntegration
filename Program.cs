@@ -38,6 +38,7 @@ builder.Services.AddSingleton<SquareClient>(serviceProvider =>
 // Register services used by the Square integration.
 builder.Services.AddScoped<SquareOrderService>();
 builder.Services.AddScoped<SquareProductService>();
+builder.Services.AddScoped<CBETransactionService>();
 
 // Register SQL access.
 builder.Services.AddScoped<IDataAccess>(serviceProvider =>

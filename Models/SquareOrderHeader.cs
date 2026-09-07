@@ -12,5 +12,7 @@ namespace SquareUpIntegration.Models
         public long? TotalAmountMinor { get; set; }
         public string? Currency { get; set; }
         public string? SourceName { get; set; }
+        public DateTimeOffset? PickupAtUtc { get; set; }
+        public DateOnly? CollectionDate { get; set; }
     }
 }

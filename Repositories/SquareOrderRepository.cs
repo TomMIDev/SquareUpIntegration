@@ -13,14 +13,20 @@ namespace SquareUpIntegration.Repositories
                 ?? throw new ArgumentNullException(nameof(dataAccess));
         }
 
-        public async Task BeginOrderRefreshAsync(
+        public async Task UpsertOrderAsync(
             SquareOrderHeader order,
-            Guid refreshToken,
-            long? pollRunId = null,
+            long pollRunId,
             CancellationToken cancellationToken = default)
         {
             ArgumentNullException.ThrowIfNull(order);
             cancellationToken.ThrowIfCancellationRequested();
+
+            if (pollRunId <= 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(pollRunId),
+                    "Poll Run ID must be greater than zero.");
+            }
 
             if (string.IsNullOrWhiteSpace(order.SquareOrderId))
             {
@@ -48,48 +54,56 @@ namespace SquareUpIntegration.Repositories
                 ["@TotalAmountMinor"] = DbValue(order.TotalAmountMinor),
                 ["@Currency"] = DbValue(order.Currency),
                 ["@SourceName"] = DbValue(order.SourceName),
-                ["@PollRunId"] = DbValue(pollRunId),
-                ["@RefreshToken"] = refreshToken
+                ["@PickupAtUtc"] = DbValue(order.PickupAtUtc),
+                ["@CollectionDate"] = DbValue(
+                    order.CollectionDate?
+                        .ToDateTime(TimeOnly.MinValue)),
+                ["@PollRunId"] = pollRunId
             };
 
             await _dataAccess.ExecuteAsync(
-                "Square.BeginOrderRefresh",
+                "Square.UpsertOrder",
                 parameters);
         }
 
-        public async Task UpsertOrderFulfillmentAsync(
-            SquareOrderFulfillmentRecord fulfillment,
-            Guid refreshToken,
+        public async Task DeleteOrderLinesAsync(
+            string squareOrderId,
             CancellationToken cancellationToken = default)
         {
-            ArgumentNullException.ThrowIfNull(fulfillment);
             cancellationToken.ThrowIfCancellationRequested();
+
+            ValidateSquareOrderId(squareOrderId);
 
             var parameters = new Dictionary<string, object>
             {
-                ["@SquareOrderId"] = fulfillment.SquareOrderId,
-                ["@FulfillmentUid"] = fulfillment.FulfillmentUid,
-                ["@FulfillmentType"] = DbValue(fulfillment.FulfillmentType),
-                ["@FulfillmentState"] = DbValue(fulfillment.FulfillmentState),
-                ["@PickupAtUtc"] = DbValue(fulfillment.PickupAtUtc),
-                ["@CollectionDate"] = DbValue(
-                    fulfillment.CollectionDate?.ToDateTime(TimeOnly.MinValue)),
-                ["@ScheduleType"] = DbValue(fulfillment.ScheduleType),
-                ["@RefreshToken"] = refreshToken
+                ["@SquareOrderId"] = squareOrderId
             };
 
             await _dataAccess.ExecuteAsync(
-                "Square.UpsertOrderFulfillment",
+                "Square.DeleteOrderLines",
                 parameters);
         }
 
-        public async Task UpsertOrderLineAsync(
+        public async Task InsertOrderLineAsync(
             SquareOrderLineRecord orderLine,
-            Guid refreshToken,
             CancellationToken cancellationToken = default)
         {
             ArgumentNullException.ThrowIfNull(orderLine);
             cancellationToken.ThrowIfCancellationRequested();
+
+            if (string.IsNullOrWhiteSpace(orderLine.SquareOrderId))
+            {
+                throw new ArgumentException(
+                    "Square Order ID must be supplied.",
+                    nameof(orderLine));
+            }
+
+            if (string.IsNullOrWhiteSpace(orderLine.LineUid))
+            {
+                throw new ArgumentException(
+                    "Square order line UID must be supplied.",
+                    nameof(orderLine));
+            }
 
             if (orderLine.Quantity <= 0)
             {
@@ -110,38 +124,41 @@ namespace SquareUpIntegration.Repositories
                 ["@BasePriceAmountMinor"] = DbValue(orderLine.BasePriceAmountMinor),
                 ["@TotalAmountMinor"] = DbValue(orderLine.TotalAmountMinor),
                 ["@Currency"] = DbValue(orderLine.Currency),
-                ["@ItemType"] = DbValue(orderLine.ItemType),
-                ["@RefreshToken"] = refreshToken
+                ["@ItemType"] = DbValue(orderLine.ItemType)
             };
 
             await _dataAccess.ExecuteAsync(
-                "Square.UpsertOrderLine",
+                "Square.InsertOrderLine",
                 parameters);
         }
 
         public async Task CompleteOrderRefreshAsync(
             string squareOrderId,
-            Guid refreshToken,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            ValidateSquareOrderId(squareOrderId);
+
+            var parameters = new Dictionary<string, object>
+            {
+                ["@SquareOrderId"] = squareOrderId
+            };
+
+            await _dataAccess.ExecuteAsync(
+                "Square.CompleteOrderRefresh",
+                parameters);
+        }
+
+        private static void ValidateSquareOrderId(
+            string squareOrderId)
+        {
             if (string.IsNullOrWhiteSpace(squareOrderId))
             {
                 throw new ArgumentException(
                     "Square Order ID must be supplied.",
                     nameof(squareOrderId));
             }
-
-            var parameters = new Dictionary<string, object>
-            {
-                ["@SquareOrderId"] = squareOrderId,
-                ["@RefreshToken"] = refreshToken
-            };
-
-            await _dataAccess.ExecuteAsync(
-                "Square.CompleteOrderRefresh",
-                parameters);
         }
 
         private static object DbValue(object? value)

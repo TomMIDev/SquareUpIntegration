@@ -4,25 +4,21 @@ namespace SquareUpIntegration.Repositories
 {
     public interface ISquareOrderRepository
     {
-        Task BeginOrderRefreshAsync(
+        Task UpsertOrderAsync(
             SquareOrderHeader order,
-            Guid refreshToken,
-            long? pollRunId = null,
+            long pollRunId,
             CancellationToken cancellationToken = default);
 
-        Task UpsertOrderFulfillmentAsync(
-            SquareOrderFulfillmentRecord fulfillment,
-            Guid refreshToken,
+        Task DeleteOrderLinesAsync(
+            string squareOrderId,
             CancellationToken cancellationToken = default);
 
-        Task UpsertOrderLineAsync(
+        Task InsertOrderLineAsync(
             SquareOrderLineRecord orderLine,
-            Guid refreshToken,
             CancellationToken cancellationToken = default);
 
         Task CompleteOrderRefreshAsync(
             string squareOrderId,
-            Guid refreshToken,
             CancellationToken cancellationToken = default);
     }
 }

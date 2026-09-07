@@ -4,8 +4,8 @@ namespace SquareUpIntegration.Repositories
 {
     public interface ICbeTransactionRepository
     {
-        Task<IReadOnlyList<CbeTransactionRequest>> GetReadyTransactionsAsync(
-            DateOnly asOfDate,
-            CancellationToken cancellationToken = default);
+        Task<IReadOnlyList<CbeTransactionRequest>>
+            GetPendingTransactionsAsync(
+                CancellationToken cancellationToken = default);
     }
 }

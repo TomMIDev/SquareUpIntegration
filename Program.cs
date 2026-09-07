@@ -1,22 +1,25 @@
 using System.Globalization;
+using DataAccessUtility;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Square;
-using SquareUpIntegration.Services;
-using DataAccessUtility;
 using SquareUpIntegration.Repositories;
+using SquareUpIntegration.Services;
 
 var builder = Host.CreateApplicationBuilder(args);
 
-Console.WriteLine($"Host environment: {builder.Environment.EnvironmentName}");
+Console.WriteLine(
+    $"Host environment: {builder.Environment.EnvironmentName}");
 
 // Register the Square API client once for the lifetime of the application.
 builder.Services.AddSingleton<SquareClient>(serviceProvider =>
 {
-    var configuration = serviceProvider.GetRequiredService<IConfiguration>();
+    var configuration =
+        serviceProvider.GetRequiredService<IConfiguration>();
 
-    var accessToken = configuration["Square:AccessToken"];
+    var accessToken =
+        configuration["Square:AccessToken"];
 
     if (string.IsNullOrWhiteSpace(accessToken))
     {
@@ -26,7 +29,6 @@ builder.Services.AddSingleton<SquareClient>(serviceProvider =>
 
     Console.WriteLine("Square environment: Sandbox");
 
-    // Force the Square client to use the Sandbox API.
     return new SquareClient(
         accessToken,
         new ClientOptions
@@ -35,12 +37,11 @@ builder.Services.AddSingleton<SquareClient>(serviceProvider =>
         });
 });
 
-// Register services used by the Square integration.
+// Square API services.
 builder.Services.AddScoped<SquareOrderService>();
 builder.Services.AddScoped<SquareProductService>();
-builder.Services.AddScoped<CBETransactionService>();
 
-// Register SQL access.
+// SQL access.
 builder.Services.AddScoped<IDataAccess>(serviceProvider =>
 {
     var configuration =
@@ -58,34 +59,42 @@ builder.Services.AddScoped<IDataAccess>(serviceProvider =>
     return new SqlDataAccess(connectionString);
 });
 
-// Register repositories used to persist Square reference data.
+// Reference-data repositories/services.
 builder.Services.AddScoped<
     ISquareReferenceDataRepository,
     SquareReferenceDataRepository>();
 
-// Register the repository used to persist Square orders,
-// fulfilments and order line items.
+builder.Services.AddScoped<SquareReferenceDataService>();
+
+// Order staging repositories/services.
 builder.Services.AddScoped<
     ISquareOrderRepository,
     SquareOrderRepository>();
 
-// Register the service that coordinates saving Square locations
-// and catalogue variations to the database.
-builder.Services.AddScoped<SquareReferenceDataService>();
-
-// Register the service that stages Square orders to the database.
 builder.Services.AddScoped<SquareOrderPersistenceService>();
+
+// Poll-run repositories/services.
+builder.Services.AddScoped<
+    IPollRunRepository,
+    PollRunRepository>();
+
+builder.Services.AddScoped<PollRunService>();
 
 using var host = builder.Build();
 using var scope = host.Services.CreateScope();
 
 var squareClient =
-    scope.ServiceProvider.GetRequiredService<SquareClient>();
+    scope.ServiceProvider
+        .GetRequiredService<SquareClient>();
 
 var squareOrderService =
-    scope.ServiceProvider.GetRequiredService<SquareOrderService>();
+    scope.ServiceProvider
+        .GetRequiredService<SquareOrderService>();
+
 var squareProductService =
-    scope.ServiceProvider.GetRequiredService<SquareProductService>();
+    scope.ServiceProvider
+        .GetRequiredService<SquareProductService>();
+
 var squareReferenceDataService =
     scope.ServiceProvider
         .GetRequiredService<SquareReferenceDataService>();
@@ -98,29 +107,39 @@ var squareOrderPersistenceService =
     scope.ServiceProvider
         .GetRequiredService<SquareOrderPersistenceService>();
 
+var pollRunService =
+    scope.ServiceProvider
+        .GetRequiredService<PollRunService>();
+
 try
 {
-    // Retrieve the Square locations available to this Sandbox account.
-    var response = await squareClient.Locations.ListAsync();
+    /*
+        ============================================================
+        REFERENCE DATA
+        ============================================================
+    */
 
-    var isSandbox = string.Equals(
-        builder.Configuration["Square:Environment"],
-        "Sandbox",
-        StringComparison.OrdinalIgnoreCase);
+    var locationResponse =
+        await squareClient.Locations.ListAsync();
 
-    var locations = response.Locations?
-        .Where(location =>
-            !isSandbox ||
-            !string.Equals(
-                location.Name,
-                "Default Test Account",
-                StringComparison.OrdinalIgnoreCase))
-        .ToList()
+    var isSandbox =
+        string.Equals(
+            builder.Configuration["Square:Environment"],
+            "Sandbox",
+            StringComparison.OrdinalIgnoreCase);
+
+    var locations =
+        locationResponse.Locations?
+            .Where(location =>
+                !isSandbox ||
+                !string.Equals(
+                    location.Name,
+                    "Default Test Account",
+                    StringComparison.OrdinalIgnoreCase))
+            .Where(location =>
+                !string.IsNullOrWhiteSpace(location.Id))
+            .ToList()
         ?? [];
-
-    Console.WriteLine("Square connection succeeded.");
-    Console.WriteLine();
-    Console.WriteLine("Locations:");
 
     if (locations.Count == 0)
     {
@@ -130,59 +149,35 @@ try
         return;
     }
 
-    foreach (var location in locations)
-    {
-        Console.WriteLine(
-            $"{location.Name} - Location ID: {location.Id}");
-    }
+    Console.WriteLine();
+    Console.WriteLine(
+        $"Usable Square locations: {locations.Count}");
 
-
-    // Retrieve products from the Square catalogue.
-    // This runs before any order-related return statements.
     var products =
         await squareProductService.GetProductsAsync();
 
-    Console.WriteLine();
-    Console.WriteLine($"Products returned by Square: {products.Count}");
+    Console.WriteLine(
+        $"Catalogue variations returned: {products.Count}");
 
-    foreach (var product in products)
-    {
-        Console.WriteLine();
-        Console.WriteLine($"Item: {product.ItemName}");
-        Console.WriteLine($"Item ID: {product.ItemId}");
-        Console.WriteLine($"Variation: {product.VariationName}");
-        Console.WriteLine($"Variation ID: {product.VariationId}");
-        Console.WriteLine($"SKU: {product.Sku ?? "<not supplied>"}");
-
-        if (product.PriceAmount is long amount)
-        {
-            Console.WriteLine(
-                $"Price: {FormatMoney(
-                    amount,
-                    product.Currency)}");
-        }
-        else
-        {
-            Console.WriteLine("Price: <not supplied>");
-        }
-    }
-
-    // Save the Square locations and catalogue variations already retrieved
-    // above into the local SquareUp database.
     var referenceDataSaveResult =
         await squareReferenceDataService.SaveAsync(
             locations,
             products);
 
     Console.WriteLine();
-    Console.WriteLine("Reference data saved to database:");
+    Console.WriteLine("Reference data saved:");
     Console.WriteLine(
         $"  Locations: {referenceDataSaveResult.LocationsSaved}");
     Console.WriteLine(
-        $"  Catalogue variations: {referenceDataSaveResult.CatalogVariationsSaved}");
+        $"  Catalogue variations: " +
+        $"{referenceDataSaveResult.CatalogVariationsSaved}");
 
-    // Populate ProductMapping using Square SKU as the BO product code.
-    // The catalogue variation has already been written above.
+    /*
+        Keep the current development mapping rule:
+        Square SKU -> BO product code.
+
+        This can later be moved behind its own service if required.
+    */
     var productMappingsSaved = 0;
     var productMappingsSkipped = 0;
 
@@ -213,218 +208,245 @@ try
             continue;
         }
 
-        await squareReferenceDataRepository.SetProductMappingAsync(
-            product.VariationId,
-            boProductCode,
-            product.IsActive);
+        await squareReferenceDataRepository
+            .SetProductMappingAsync(
+                product.VariationId,
+                boProductCode,
+                product.IsActive);
 
         productMappingsSaved++;
     }
 
     Console.WriteLine();
-    Console.WriteLine("Product mappings saved to database:");
-    Console.WriteLine($"  Saved: {productMappingsSaved}");
-    Console.WriteLine($"  Skipped: {productMappingsSkipped}");
+    Console.WriteLine("Product mappings:");
+    Console.WriteLine(
+        $"  Saved: {productMappingsSaved}");
+    Console.WriteLine(
+        $"  Skipped: {productMappingsSkipped}");
 
-    // Extract the Location IDs required by the Orders API.
-    var locationIds = locations
-        .Where(location => !string.IsNullOrWhiteSpace(location.Id))
-        .Select(location => location.Id!)
-        .ToList();
+    /*
+        ============================================================
+        COLLECTION DATE
+        ============================================================
 
-    if (locationIds.Count == 0)
-    {
-        Console.WriteLine();
-        Console.WriteLine(
-            "Locations were returned, but none contained a valid Location ID.");
+        Orders are downloaded/staged the day before collection.
 
-        return;
-    }
+        Once an order has been staged locally, injection readiness is
+        controlled by InjectionStatusId rather than CollectionDate.
+    */
 
-    // Work out tomorrow's date using UK local time.
     var ukTimeZone = GetUkTimeZone();
 
-    var ukNow = TimeZoneInfo.ConvertTime(
-        DateTimeOffset.UtcNow,
-        ukTimeZone);
+    var ukNow =
+        TimeZoneInfo.ConvertTime(
+            DateTimeOffset.UtcNow,
+            ukTimeZone);
 
-    var collectionDate = DateOnly.FromDateTime(
-        ukNow.DateTime.AddDays(1));
+    var collectionDate =
+        DateOnly.FromDateTime(
+            ukNow.DateTime.AddDays(1));
 
     Console.WriteLine();
     Console.WriteLine(
-        $"Searching for orders due for collection on {collectionDate:dd/MM/yyyy}...");
+        $"Polling for orders due for collection on " +
+        $"{collectionDate:dd/MM/yyyy}.");
 
+    /*
+        ============================================================
+        LOCATION POLLING
+        ============================================================
 
-    var allOrders =
-    await squareOrderService.GetOrdersAsync(locationIds);
+        One PollRun is created per Square location.
 
-    Console.WriteLine();
-    Console.WriteLine($"All orders returned by Square: {allOrders.Count}");
+        Each staged order receives the PollRunId which supplied its
+        current version.
+    */
 
-    foreach (var order in allOrders)
+    var completedPolls = 0;
+    var failedPolls = 0;
+    var totalOrdersFound = 0;
+    var totalOrdersStaged = 0;
+    var totalOrderLinesStaged = 0;
+
+    foreach (var location in locations)
     {
-        Console.WriteLine(
-            $"  {order.Id} - Location: {order.LocationId}");
-    }
+        var squareLocationId = location.Id!;
 
-    Console.WriteLine();
-
-    // Filter the orders already returned by Square.
-    // This avoids making a second SearchOrders API call and ensures
-    // that the collection-date filter works against the same snapshot.
-    var ordersForCollection =
-        squareOrderService.GetOrdersForCollectionDate(
-            allOrders,
-            collectionDate);
-
-    Console.WriteLine();
-    Console.WriteLine(
-        $"Orders for collection on {collectionDate:dd/MM/yyyy}:");
-
-    Console.WriteLine();
-    Console.WriteLine(
-        $"Filtered orders count: {ordersForCollection.Count}");
-
-    foreach (var order in allOrders)
-    {
-        Console.WriteLine();
-        Console.WriteLine($"Checking Order: {order.Id}");
-
-        if (order.Fulfillments == null)
-        {
-            Console.WriteLine("  No fulfillments.");
-            continue;
-        }
-
-        foreach (var fulfillment in order.Fulfillments)
-        {
-            Console.WriteLine(
-                $"  Fulfillment Type: {fulfillment.Type}");
-
-            Console.WriteLine(
-                $"  Pickup At: " +
-                $"{fulfillment.PickupDetails?.PickupAt ?? "<none>"}");
-        }
-    }
-
-    if (!ordersForCollection.Any())
-    {
-        Console.WriteLine("No orders found for collection tomorrow.");
-        return;
-    }
-
-    if (!ordersForCollection.Any())
-    {
-        Console.WriteLine("No orders found for collection tomorrow.");
-        return;
-    }
-
-    // Stage the complete orders due for collection tomorrow.
-    // This writes:
-    //   Square.SquareOrder
-    //   Square.OrderFulfillment
-    //   Square.OrderLine
-    var orderPersistenceResult =
-        await squareOrderPersistenceService.SaveAsync(
-            ordersForCollection);
-
-    Console.WriteLine();
-    Console.WriteLine("Orders staged to database:");
-    Console.WriteLine(
-        $"  Orders: {orderPersistenceResult.OrdersSaved}");
-    Console.WriteLine(
-        $"  Fulfilments: {orderPersistenceResult.FulfillmentsSaved}");
-    Console.WriteLine(
-        $"  Order lines: {orderPersistenceResult.OrderLinesSaved}");
-
-    foreach (var order in ordersForCollection)
-    {
         Console.WriteLine();
         Console.WriteLine(new string('-', 70));
+        Console.WriteLine(
+            $"Polling: {location.Name ?? "<unnamed location>"}");
+        Console.WriteLine(
+            $"Location ID: {squareLocationId}");
 
-        Console.WriteLine($"Order ID: {order.Id}");
-        Console.WriteLine($"Location ID: {order.LocationId}");
-        Console.WriteLine($"Order State: {order.State}");
+        long? pollRunId = null;
 
-        if (order.Fulfillments != null)
+        try
         {
-            foreach (var fulfillment in order.Fulfillments)
-            {
-                Console.WriteLine();
-                Console.WriteLine("Pickup:");
-                Console.WriteLine($"  Type: {fulfillment.Type}");
-                Console.WriteLine($"  State: {fulfillment.State}");
+            /*
+                Find the previous successful poll before starting the new
+                PollRun.
 
-                if (fulfillment.PickupDetails != null)
-                {
-                    var pickupAtText =
-                        fulfillment.PickupDetails.PickupAt;
+                For subsequent polls we deliberately use StartedAtUtc
+                rather than CompletedAtUtc. This creates a small overlap
+                between polls and avoids missing an order amended while
+                the previous poll was still running.
+            */
+            var lastSuccessfulPoll =
+                await pollRunService.GetLastSuccessfulAsync(
+                    squareLocationId,
+                    collectionDate);
 
-                    if (TryConvertToUkTime(
-                        pickupAtText,
-                        ukTimeZone,
-                        out var pickupAtUk))
-                    {
-                        Console.WriteLine(
-                            $"  Pickup At: {pickupAtUk:dd/MM/yyyy HH:mm:ss} UK");
-                    }
-                    else
-                    {
-                        Console.WriteLine(
-                            $"  Pickup At: {pickupAtText ?? "<not supplied>"}");
-                    }
+            pollRunId =
+                await pollRunService.StartAsync(
+                    squareLocationId,
+                    collectionDate);
 
-                    var scheduleType =
-                        fulfillment.PickupDetails.ScheduleType?.ToString();
+            IReadOnlyList<Order> locationOrders;
 
-                    Console.WriteLine(
-                        $"  Schedule Type: " +
-                        $"{(string.IsNullOrWhiteSpace(scheduleType) ? "<not supplied>" : scheduleType)}");
-                }
-            }
-        }
-
-        Console.WriteLine();
-        Console.WriteLine("Items:");
-
-        if (order.LineItems == null || !order.LineItems.Any())
-        {
-            Console.WriteLine("  No line items found.");
-            continue;
-        }
-
-        foreach (var item in order.LineItems)
-        {
-            Console.WriteLine($"  Name: {item.Name}");
-            Console.WriteLine($"  Quantity: {item.Quantity}");
-
-            Console.WriteLine(
-                $"  Catalog Object ID: " +
-                $"{item.CatalogObjectId ?? "<none - ad hoc>"}");
-
-            if (item.BasePriceMoney?.Amount is long amount)
+            if (lastSuccessfulPoll == null)
             {
                 Console.WriteLine(
-                    $"  Unit Price: " +
-                    $"{FormatMoney(
-                        amount,
-                        item.BasePriceMoney.Currency?.ToString())}");
+                    "No previous successful poll found. " +
+                    "Running initial order search.");
+
+                locationOrders =
+                    await squareOrderService.GetOrdersAsync(
+                        [squareLocationId]);
             }
             else
             {
-                Console.WriteLine("  Unit Price: <not supplied>");
+                var updatedSinceUtc =
+                    new DateTimeOffset(
+                        DateTime.SpecifyKind(
+                            lastSuccessfulPoll.StartedAtUtc,
+                            DateTimeKind.Utc));
+
+                Console.WriteLine(
+                    $"Previous successful poll started at " +
+                    $"{updatedSinceUtc:dd/MM/yyyy HH:mm:ss} UTC.");
+
+                Console.WriteLine(
+                    "Searching Square for orders updated since that time.");
+
+                locationOrders =
+                    await squareOrderService.GetOrdersAsync(
+                        [squareLocationId],
+                        updatedSinceUtc);
             }
 
-            Console.WriteLine();
+            /*
+                Square's UPDATED_AT filter tells us what has changed.
+
+                The collection-date rule is then applied locally so only
+                orders due for the required UK collection date are staged.
+            */
+            var ordersForCollection =
+                squareOrderService.GetOrdersForCollectionDate(
+                    locationOrders,
+                    collectionDate);
+
+            var ordersFound =
+                ordersForCollection.Count;
+
+            totalOrdersFound +=
+                ordersFound;
+
+            Console.WriteLine(
+                $"Orders found for collection date: {ordersFound}");
+
+            var ordersStaged = 0;
+            var orderLinesStaged = 0;
+
+            if (ordersFound > 0)
+            {
+                var persistenceResult =
+                    await squareOrderPersistenceService.SaveAsync(
+                        ordersForCollection,
+                        pollRunId.Value);
+
+                ordersStaged =
+                    persistenceResult.OrdersSaved;
+
+                orderLinesStaged =
+                    persistenceResult.OrderLinesSaved;
+
+                totalOrdersStaged +=
+                    ordersStaged;
+
+                totalOrderLinesStaged +=
+                    orderLinesStaged;
+            }
+
+            await pollRunService.CompleteAsync(
+                pollRunId.Value,
+                ordersFound,
+                ordersStaged);
+
+            completedPolls++;
+
+            Console.WriteLine(
+                $"Orders staged: {ordersStaged}");
+
+            Console.WriteLine(
+                $"Order lines staged: {orderLinesStaged}");
+
+            Console.WriteLine(
+                $"PollRun {pollRunId.Value} completed.");
+        }
+        catch (Exception ex)
+        {
+            failedPolls++;
+
+            if (pollRunId.HasValue)
+            {
+                try
+                {
+                    await pollRunService.FailAsync(
+                        pollRunId.Value,
+                        ex);
+                }
+                catch (Exception failPollException)
+                {
+                    Console.WriteLine(
+                        $"Unable to mark PollRun {pollRunId.Value} " +
+                        $"as failed: {failPollException.Message}");
+                }
+            }
+
+            Console.WriteLine(
+                $"Polling failed for location " +
+                $"{location.Name ?? squareLocationId}: {ex.Message}");
         }
     }
+
+    /*
+        ============================================================
+        RUN SUMMARY
+        ============================================================
+    */
+
+    Console.WriteLine();
+    Console.WriteLine(new string('=', 70));
+    Console.WriteLine("Polling complete.");
+    Console.WriteLine(
+        $"  Successful location polls: {completedPolls}");
+    Console.WriteLine(
+        $"  Failed location polls: {failedPolls}");
+    Console.WriteLine(
+        $"  Orders found: {totalOrdersFound}");
+    Console.WriteLine(
+        $"  Orders staged: {totalOrdersStaged}");
+    Console.WriteLine(
+        $"  Order lines staged: {totalOrderLinesStaged}");
 }
 catch (SquareApiException ex)
 {
     Console.WriteLine("Square API request failed.");
-    Console.WriteLine($"Status code: {ex.StatusCode}");
-    Console.WriteLine($"Message: {ex.Message}");
+    Console.WriteLine(
+        $"Status code: {ex.StatusCode}");
+    Console.WriteLine(
+        $"Message: {ex.Message}");
 }
 catch (Exception ex)
 {
@@ -432,64 +454,16 @@ catch (Exception ex)
     Console.WriteLine(ex.Message);
 }
 
-
-static bool TryConvertToUkTime(
-    string? pickupAtText,
-    TimeZoneInfo ukTimeZone,
-    out DateTimeOffset pickupAtUk)
-{
-    pickupAtUk = default;
-
-    if (string.IsNullOrWhiteSpace(pickupAtText))
-    {
-        return false;
-    }
-
-    if (!DateTimeOffset.TryParse(
-        pickupAtText,
-        CultureInfo.InvariantCulture,
-        DateTimeStyles.RoundtripKind,
-        out var pickupAt))
-    {
-        return false;
-    }
-
-    pickupAtUk = TimeZoneInfo.ConvertTime(
-        pickupAt,
-        ukTimeZone);
-
-    return true;
-}
-
 static TimeZoneInfo GetUkTimeZone()
 {
     try
     {
-        // Windows
         return TimeZoneInfo.FindSystemTimeZoneById(
             "GMT Standard Time");
     }
     catch (TimeZoneNotFoundException)
     {
-        // Linux / macOS
         return TimeZoneInfo.FindSystemTimeZoneById(
             "Europe/London");
     }
-}
-
-static string FormatMoney(
-    long amount,
-    string? currency)
-{
-    var majorUnits = amount / 100m;
-
-    if (string.Equals(
-        currency,
-        "GBP",
-        StringComparison.OrdinalIgnoreCase))
-    {
-        return $"£{majorUnits:N2}";
-    }
-
-    return $"{majorUnits:N2} {currency ?? string.Empty}".Trim();
 }

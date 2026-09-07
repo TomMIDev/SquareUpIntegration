@@ -22,14 +22,48 @@ namespace SquareUpIntegration.Services
             _ukTimeZone = GetUkTimeZone();
         }
 
+        /*
+            First-poll / unrestricted version.
+
+            This preserves the existing behaviour for a location which has
+            never had a successful PollRun.
+        */
+        public Task<IReadOnlyList<Order>> GetOrdersAsync(
+            IEnumerable<string> locationIds,
+            CancellationToken cancellationToken = default)
+        {
+            return GetOrdersAsync(
+                locationIds,
+                updatedSinceUtc: null,
+                cancellationToken);
+        }
+
+        /*
+            Poll-aware version.
+
+            When updatedSinceUtc is supplied, Square is asked only for
+            orders whose UPDATED_AT timestamp is on or after that value.
+
+            Square's UPDATED_AT filter is inclusive, so seeing the same
+            order again at a poll boundary is safe. The staging layer
+            replaces the existing Pending order data rather than creating
+            a duplicate.
+
+            For subsequent polling, pass the StartedAtUtc value from the
+            previous successful PollRun rather than CompletedAtUtc. Using
+            the previous poll start creates a deliberate overlap and avoids
+            missing an amendment which occurred while that poll was running.
+        */
         public async Task<IReadOnlyList<Order>> GetOrdersAsync(
             IEnumerable<string> locationIds,
+            DateTimeOffset? updatedSinceUtc,
             CancellationToken cancellationToken = default)
         {
             ArgumentNullException.ThrowIfNull(locationIds);
 
             var locations = locationIds
-                .Where(locationId => !string.IsNullOrWhiteSpace(locationId))
+                .Where(locationId =>
+                    !string.IsNullOrWhiteSpace(locationId))
                 .Distinct()
                 .ToList();
 
@@ -40,25 +74,37 @@ namespace SquareUpIntegration.Services
 
             var orders = new List<Order>();
 
-            // Square SearchOrders accepts a maximum of 10 location IDs
-            // in a single request.
+            /*
+                SearchOrders accepts a maximum of 10 location IDs in one
+                request.
+
+                Program.cs currently polls one location at a time, but
+                retaining batching keeps this service reusable.
+            */
             foreach (var locationBatch in locations.Chunk(10))
             {
                 string? cursor = null;
 
+                var query =
+                    CreateSearchQuery(updatedSinceUtc);
+
                 do
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+
                     var request = new SearchOrdersRequest
                     {
                         LocationIds = locationBatch,
                         Cursor = cursor,
+                        Query = query,
                         Limit = 1000,
                         ReturnEntries = false
                     };
 
-                    var response = await _client.Orders.SearchAsync(
-                        request,
-                        cancellationToken: cancellationToken);
+                    var response =
+                        await _client.Orders.SearchAsync(
+                            request,
+                            cancellationToken: cancellationToken);
 
                     if (response.Orders != null)
                     {
@@ -87,10 +133,14 @@ namespace SquareUpIntegration.Services
                 .ToList();
         }
 
-        public async Task<IReadOnlyList<Order>> GetOrdersForCollectionDateAsync(
-            IEnumerable<string> locationIds,
-            DateOnly collectionDate,
-            CancellationToken cancellationToken = default)
+        /*
+            First-poll convenience method.
+        */
+        public async Task<IReadOnlyList<Order>>
+            GetOrdersForCollectionDateAsync(
+                IEnumerable<string> locationIds,
+                DateOnly collectionDate,
+                CancellationToken cancellationToken = default)
         {
             var orders = await GetOrdersAsync(
                 locationIds,
@@ -99,6 +149,76 @@ namespace SquareUpIntegration.Services
             return GetOrdersForCollectionDate(
                 orders,
                 collectionDate);
+        }
+
+        /*
+            Subsequent-poll convenience method.
+
+            The API request is first restricted to new/changed orders,
+            then the existing UK collection-date rule is applied locally.
+        */
+        public async Task<IReadOnlyList<Order>>
+            GetOrdersForCollectionDateAsync(
+                IEnumerable<string> locationIds,
+                DateOnly collectionDate,
+                DateTimeOffset updatedSinceUtc,
+                CancellationToken cancellationToken = default)
+        {
+            var orders = await GetOrdersAsync(
+                locationIds,
+                updatedSinceUtc,
+                cancellationToken);
+
+            return GetOrdersForCollectionDate(
+                orders,
+                collectionDate);
+        }
+
+        private static SearchOrdersQuery? CreateSearchQuery(
+            DateTimeOffset? updatedSinceUtc)
+        {
+            if (!updatedSinceUtc.HasValue)
+            {
+                return null;
+            }
+
+            var startAt =
+                updatedSinceUtc.Value
+                    .ToUniversalTime()
+                    .ToString(
+                        "yyyy-MM-dd'T'HH:mm:ss.fff'Z'",
+                        CultureInfo.InvariantCulture);
+
+            /*
+                Square requires the SearchOrders sort field to match the
+                timestamp used by DateTimeFilter.
+
+                Because we filter on UpdatedAt, we must also sort on
+                SearchOrdersSortField.UpdatedAt.
+            */
+            return new SearchOrdersQuery
+            {
+                Filter = new SearchOrdersFilter
+                {
+                    DateTimeFilter =
+                        new SearchOrdersDateTimeFilter
+                        {
+                            UpdatedAt = new TimeRange
+                            {
+                                StartAt = startAt
+                            }
+                        }
+                },
+
+                Sort = new SearchOrdersSort
+                {
+                    SortField =
+                        SearchOrdersSortField.UpdatedAt,
+
+                    SortOrder =
+                        SortOrder.Asc
+                }
+            };
         }
 
         private bool HasPickupOnCollectionDate(
@@ -112,6 +232,18 @@ namespace SquareUpIntegration.Services
 
             foreach (var fulfillment in order.Fulfillments)
             {
+                /*
+                    Only pickup fulfilments are relevant to this
+                    integration.
+                */
+                if (!string.Equals(
+                    fulfillment.Type?.ToString(),
+                    "PICKUP",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 var pickupAtText =
                     fulfillment.PickupDetails?.PickupAt;
 
@@ -129,14 +261,18 @@ namespace SquareUpIntegration.Services
                     continue;
                 }
 
-                // Convert Square's timestamp to UK local time before
-                // deciding which collection date it belongs to.
-                var pickupAtUk = TimeZoneInfo.ConvertTime(
-                    pickupAt,
-                    _ukTimeZone);
+                /*
+                    Convert Square's timestamp to UK local time before
+                    deciding which collection date it belongs to.
+                */
+                var pickupAtUk =
+                    TimeZoneInfo.ConvertTime(
+                        pickupAt,
+                        _ukTimeZone);
 
-                var pickupDate = DateOnly.FromDateTime(
-                    pickupAtUk.DateTime);
+                var pickupDate =
+                    DateOnly.FromDateTime(
+                        pickupAtUk.DateTime);
 
                 if (pickupDate == collectionDate)
                 {

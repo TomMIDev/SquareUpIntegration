@@ -14,5 +14,7 @@ namespace SquareUpIntegration.Models
         public DateTime TransactionDateTime { get; set; }
 
         public List<CbeTransactionLine> Lines { get; set; } = [];
+
+        public string GlobalPurchaseNumber { get; set; } = string.Empty;
     }
 }

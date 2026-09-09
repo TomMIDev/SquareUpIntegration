@@ -1,5 +1,4 @@
 using DataAccessUtility;
-using Microsoft.Data.SqlClient;
 using SquareUpIntegration.Models;
 
 namespace SquareUpIntegration.Repositories
@@ -24,11 +23,10 @@ namespace SquareUpIntegration.Repositories
             cancellationToken.ThrowIfCancellationRequested();
 
             var rows = (
-                await _dataAccess.QueryAsync(
-                    "Square.GetPendingTransactions",
-                    MapPendingTransactionRow,
-                    new Dictionary<string, object>()))
-                .ToList();
+            await _dataAccess.QueryAsync<PendingTransactionRow>(
+                "Square.GetPendingTransactions",
+                new Dictionary<string, object>()))
+            .ToList();
 
             if (rows.Count == 0)
             {
@@ -55,6 +53,7 @@ namespace SquareUpIntegration.Repositories
                     new CbeTransactionRequest
                     {
                         SquareOrderId = firstRow.SquareOrderId,
+                        GlobalPurchaseNumber = firstRow.GlobalPurchaseNumber,
                         SquareLocationId = firstRow.SquareLocationId,
                         BOStoreCode = firstRow.BOStoreCode,
                         TransactionDateTime =
@@ -87,46 +86,6 @@ namespace SquareUpIntegration.Repositories
             return transactions;
         }
 
-        private static PendingTransactionRow MapPendingTransactionRow(
-            SqlDataReader reader)
-        {
-            return new PendingTransactionRow
-            {
-                SquareOrderId =
-                    GetRequiredString(reader, "SquareOrderId"),
-
-                SquareLocationId =
-                    GetRequiredString(reader, "SquareLocationId"),
-
-                BOStoreCode =
-                    GetRequiredInt32(reader, "BOStoreCode"),
-
-                PickupAtUtc =
-                    GetRequiredDateTimeOffset(reader, "PickupAtUtc"),
-
-                LineUid =
-                    GetRequiredString(reader, "LineUid"),
-
-                BOProductCode =
-                    GetRequiredInt32(reader, "BOProductCode"),
-
-                PLUID =
-                    GetRequiredValueAsString(reader, "PLUID"),
-
-                Quantity =
-                    GetRequiredDecimal(reader, "Quantity"),
-
-                BasePriceAmountMinor =
-                    GetRequiredInt64(reader, "BasePriceAmountMinor"),
-
-                LineTotalAmountMinor =
-                    GetRequiredInt64(reader, "LineTotalAmountMinor"),
-
-                Currency =
-                    GetRequiredString(reader, "LineCurrency")
-            };
-        }
-
         private static void ValidateOrderRows(
             string squareOrderId,
             IReadOnlyList<PendingTransactionRow> rows)
@@ -135,6 +94,18 @@ namespace SquareUpIntegration.Repositories
             {
                 throw new InvalidOperationException(
                     $"Square order {squareOrderId} has no transaction lines.");
+            }
+
+            var globalPurchaseNumbers =
+                rows.Select(r => r.GlobalPurchaseNumber)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+
+            if (globalPurchaseNumbers.Count != 1 ||
+                string.IsNullOrWhiteSpace(globalPurchaseNumbers[0]))
+            {
+                throw new InvalidOperationException(
+                    $"Square order {squareOrderId} must have one valid Global Purchase Number.");
             }
 
             if (rows.Select(r => r.BOStoreCode).Distinct().Count() != 1)
@@ -156,9 +127,10 @@ namespace SquareUpIntegration.Repositories
                     $"Square order {squareOrderId} returned more than one pickup date/time.");
             }
 
-            var currencies = rows.Select(r => r.Currency)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            var currencies =
+                rows.Select(row => row.LineCurrency)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
 
             if (currencies.Count != 1 ||
                 !string.Equals(
@@ -170,101 +142,6 @@ namespace SquareUpIntegration.Repositories
                     $"Square order {squareOrderId} must contain one GBP currency.");
             }
         }
-
-        private static string GetRequiredString(
-            SqlDataReader reader,
-            string columnName)
-        {
-            var ordinal = reader.GetOrdinal(columnName);
-
-            if (reader.IsDBNull(ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"Required database column {columnName} was NULL.");
-            }
-
-            return reader.GetString(ordinal);
-        }
-
-        private static string GetRequiredValueAsString(
-            SqlDataReader reader,
-            string columnName)
-        {
-            var ordinal = reader.GetOrdinal(columnName);
-
-            if (reader.IsDBNull(ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"Required database column {columnName} was NULL.");
-            }
-
-            return Convert.ToString(
-                       reader.GetValue(ordinal),
-                       System.Globalization.CultureInfo.InvariantCulture)
-                   ?? throw new InvalidOperationException(
-                       $"Required database column {columnName} could not be converted.");
-        }
-
-        private static int GetRequiredInt32(
-            SqlDataReader reader,
-            string columnName)
-        {
-            var ordinal = reader.GetOrdinal(columnName);
-
-            if (reader.IsDBNull(ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"Required database column {columnName} was NULL.");
-            }
-
-            return reader.GetInt32(ordinal);
-        }
-
-        private static long GetRequiredInt64(
-            SqlDataReader reader,
-            string columnName)
-        {
-            var ordinal = reader.GetOrdinal(columnName);
-
-            if (reader.IsDBNull(ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"Required database column {columnName} was NULL.");
-            }
-
-            return reader.GetInt64(ordinal);
-        }
-
-        private static decimal GetRequiredDecimal(
-            SqlDataReader reader,
-            string columnName)
-        {
-            var ordinal = reader.GetOrdinal(columnName);
-
-            if (reader.IsDBNull(ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"Required database column {columnName} was NULL.");
-            }
-
-            return reader.GetDecimal(ordinal);
-        }
-
-        private static DateTimeOffset GetRequiredDateTimeOffset(
-            SqlDataReader reader,
-            string columnName)
-        {
-            var ordinal = reader.GetOrdinal(columnName);
-
-            if (reader.IsDBNull(ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"Required database column {columnName} was NULL.");
-            }
-
-            return reader.GetDateTimeOffset(ordinal);
-        }
-
         private static TimeZoneInfo GetUkTimeZone()
         {
             try
@@ -282,6 +159,7 @@ namespace SquareUpIntegration.Repositories
         private sealed class PendingTransactionRow
         {
             public string SquareOrderId { get; set; } = string.Empty;
+            public string GlobalPurchaseNumber { get; set; } = string.Empty;
             public string SquareLocationId { get; set; } = string.Empty;
             public int BOStoreCode { get; set; }
             public DateTimeOffset PickupAtUtc { get; set; }
@@ -291,7 +169,7 @@ namespace SquareUpIntegration.Repositories
             public decimal Quantity { get; set; }
             public long BasePriceAmountMinor { get; set; }
             public long LineTotalAmountMinor { get; set; }
-            public string Currency { get; set; } = string.Empty;
+            public string LineCurrency { get; set; } = string.Empty;
         }
     }
 }

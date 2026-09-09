@@ -15,7 +15,7 @@ namespace SquareUpIntegration.Services
 
             var receipt = new Receipt(PaymentType)
             {
-                ReceiptNo = transaction.SquareOrderId,
+                ReceiptNo = transaction.GlobalPurchaseNumber,
                 DateTime = transaction.TransactionDateTime,
                 Status = 0
             };

@@ -80,6 +80,15 @@ builder.Services.AddScoped<
 
 builder.Services.AddScoped<PollRunService>();
 
+// Pending transaction repository.
+builder.Services.AddScoped<
+    ICbeTransactionRepository,
+    CbeTransactionRepository>();
+
+// BO-format preview only.
+// This does not invoke the CBE integration library.
+builder.Services.AddScoped<CbeReceiptPreviewFormatter>();
+
 using var host = builder.Build();
 using var scope = host.Services.CreateScope();
 
@@ -110,6 +119,14 @@ var squareOrderPersistenceService =
 var pollRunService =
     scope.ServiceProvider
         .GetRequiredService<PollRunService>();
+
+var cbeTransactionRepository =
+    scope.ServiceProvider
+        .GetRequiredService<ICbeTransactionRepository>();
+
+var cbeReceiptPreviewFormatter =
+    scope.ServiceProvider
+        .GetRequiredService<CbeReceiptPreviewFormatter>();
 
 try
 {
@@ -439,6 +456,39 @@ try
         $"  Orders staged: {totalOrdersStaged}");
     Console.WriteLine(
         $"  Order lines staged: {totalOrderLinesStaged}");
+
+    /*
+        ============================================================
+        PREVIEW PENDING BO RECEIPT DATA
+        ============================================================
+
+        This stage does not invoke CBETransactionIntegration.
+
+        It reads locally staged Pending orders and formats them into
+        the same master/line shape expected by the store BO process.
+
+        No Receipts.Push call is made and InjectionStatusId is not
+        changed here.
+    */
+
+    var pendingTransactions =
+        await cbeTransactionRepository
+            .GetPendingTransactionsAsync();
+
+    Console.WriteLine();
+    Console.WriteLine(new string('=', 70));
+    Console.WriteLine(
+        $"Pending CBE transactions: {pendingTransactions.Count}");
+
+    foreach (var transaction in pendingTransactions)
+    {
+        var preview =
+            cbeReceiptPreviewFormatter.Build(
+                transaction);
+
+        cbeReceiptPreviewFormatter.WriteToConsole(
+            preview);
+    }
 }
 catch (SquareApiException ex)
 {

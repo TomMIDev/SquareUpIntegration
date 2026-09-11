@@ -79,10 +79,19 @@ namespace SquareUpIntegration.Services
                     "Square Order ID must be supplied.");
             }
 
-            if (transaction.SquareOrderId.Length > 50)
+            if (string.IsNullOrWhiteSpace(
+                transaction.GlobalPurchaseNumber))
             {
                 throw new InvalidOperationException(
-                    $"Square Order ID '{transaction.SquareOrderId}' " +
+                    $"Square order {transaction.SquareOrderId} " +
+                    "does not have a Global Purchase Number.");
+            }
+
+            if (transaction.GlobalPurchaseNumber.Length > 50)
+            {
+                throw new InvalidOperationException(
+                    $"Global Purchase Number " +
+                    $"'{transaction.GlobalPurchaseNumber}' " +
                     "is longer than the 50-character ReceiptNo supported by CBE.");
             }
 
